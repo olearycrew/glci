@@ -38,6 +38,8 @@ const LOCAL_CI_DIR = ARGV.dir
   ? path.resolve(process.cwd(), ARGV.dir)
   : path.resolve(process.cwd(), ".glci");
 
+const LOCAL_CI_CACHE_DIR = path.join(LOCAL_CI_DIR, ".glci_cache");
+
 // keys unusable as job name because reserved
 const RESERVED_JOB_NAMES = [
   "image",
@@ -62,6 +64,12 @@ const GLOBAL_DEFAULT_KEY = [
 ];
 
 // ----- main -----
+
+async function mkdirpRecSync(dir) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
 
 async function execCommands(workdir, container, commands, onerror) {
   for (const command of commands) {
@@ -225,15 +233,21 @@ async function main() {
         ? DEFAULT.image.name
         : DEFAULT.image;
 
-      const cache = {
-        policy: job.cache?.policy ?? DEFAULT.cache?.policy ?? "pull-push",
-        paths:
-          job.cache?.paths ?? Array.isArray(job.cache)
-            ? job.cache
-            : Array.isArray(DEFAULT.cache)
-            ? DEFAULT.cache
-            : DEFAULT.cache?.paths ?? [],
-      };
+      let cache = {};
+      if ("cache" in job) {
+        cache = {
+          policy: job.cache.policy ?? "pull-push",
+          paths: job.cache.paths ?? Array.isArray(job.cache) ? job.cache : [],
+        };
+      } else {
+        cache = {
+          policy: DEFAULT.cache?.policy ?? "pull-push",
+          paths:
+            DEFAULT.cache?.paths ?? Array.isArray(DEFAULT.cache)
+              ? DEFAULT.cache
+              : [],
+        };
+      }
 
       let artifactsFiles = ARTIFACTS;
 
@@ -322,11 +336,7 @@ async function main() {
       const projectFilesTemp = path.join(LOCAL_CI_DIR, sha);
 
       for (const file of projectFiles) {
-        if (!fs.existsSync(path.join(projectFilesTemp, path.dirname(file)))) {
-          fs.mkdirSync(path.join(projectFilesTemp, path.dirname(file)), {
-            recursive: true,
-          });
-        }
+        mkdirpRecSync(path.join(projectFilesTemp, path.dirname(file)));
 
         fs.copySync(
           `${path.resolve(process.cwd(), file)}`,
@@ -341,22 +351,22 @@ async function main() {
         HostConfig: {
           AutoRemove: true,
           Binds: [
-            // binding the copy of project directory files
+            // binding the copy of project directory
             `${projectFilesTemp}:${workdir}`,
-            // binding cache directories / files
-            ...cache.paths.map(
-              (p) =>
-                `${LOCAL_CI_DIR}/${p}:${
-                  p.startsWith("/") ? p : workdir + "/" + p
-                }${cache.policy === "pull" ? ":ro" : ""}`
-            ),
-            // binding artifacts directories / files
-            ...artifactsFiles.map(
-              (p) =>
-                `${LOCAL_CI_DIR}/${p}:${
-                  p.startsWith("/") ? p : workdir + "/" + p
-                }${job.artifacts?.paths?.includes(p) ? "" : ":ro"}`
-            ),
+            // // binding cache directories / files
+            // ...cache.paths.map(
+            //   (p) =>
+            //     `${path.join(LOCAL_CI_DIR, p)}:${path.join(workdir, p)}${
+            //       cache.policy === "pull" ? ":ro" : ""
+            //     }`
+            // ),
+            // // binding artifacts directories / files
+            // ...artifactsFiles.map(
+            //   (p) =>
+            //     `${LOCAL_CI_DIR}/${p}:${
+            //       p.startsWith("/") ? p : workdir + "/" + p
+            //     }${job.artifacts?.paths?.includes(p) ? "" : ":ro"}`
+            // ),
           ],
         },
       };
@@ -391,6 +401,15 @@ async function main() {
           const commands = job.after_script ?? DEFAULT.after_script;
 
           await execCommands(workdir, container, commands, onerror);
+        }
+
+        // updating cache (if policy asks) after job ended
+        if (cache.policy !== "pull" && cache.paths.length > 0) {
+          for (const file of cache.paths) {
+            mkdirpRecSync(path.join(projectFilesTemp, path.dirname(file)));
+          }
+
+          // TODO: actually update cache
         }
 
         // removing project files copy dir
